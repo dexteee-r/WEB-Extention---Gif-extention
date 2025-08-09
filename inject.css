@@ -1,0 +1,31 @@
+#mini-gif-footer__host {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2147483647;
+}
+
+#mini-gif-footer {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 10px;
+  pointer-events: auto;
+  background: rgba(0,0,0,0.35);
+  border-radius: 10px;
+  padding: 6px 8px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.25);
+
+
+  /* pour le drag */
+  cursor: grab;
+  user-select: none;
+}
+
+#mini-gif-footer__img {
+  display: block;
+  max-height: 160px;
+  max-width: min(85vw, 560px);
+  border-radius: 6px;
+  cursor: grabbing;
+}

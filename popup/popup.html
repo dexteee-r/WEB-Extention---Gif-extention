@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Mini GIF Footer</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <h1>Mini GIF Footer</h1>
+
+      <label for="gifUrl">URL du GIF</label>
+      <input id="gifUrl" placeholder="https://.../mon.gif"/>
+
+      <div class="row">
+        <button id="show">Afficher (onglet)</button>
+        <button id="hide" class="ghost">Masquer</button>
+      </div>
+
+      <label class="row">
+        <input type="checkbox" id="everywhere">
+        <span>Afficher partout (tous onglets)</span>
+      </label>
+
+      <details>
+        <summary>Presets</summary>
+        <div id="presets" class="grid"></div>
+      </details>
+
+      <details open>
+        <summary>Ma bibliothèque</summary>
+        <input type="file" id="uploader" accept="image/gif" multiple />
+        <div id="library" class="grid"></div>
+      </details>
+    </main>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Mini GIF Footer",
+  "version": "1.1.0",
+  "description": "Affiche un GIF centré en bas de la page, choisi par l’utilisateur (URL, presets, bibliothèque).",
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Mini GIF Footer"
+  },
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  }
+  
+}
