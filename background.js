@@ -1,75 +1,77 @@
 // background.js — Mini GIF Footer (MV3)
-// Injecte GIF + drag/clamp, support "Afficher partout", persistance URL + position.
+// - Injection GIF + drag/clamp
+// - "Afficher partout" (toutes fenêtres/onglets)
+// - Persistance URL + position partagée
+// - Réinjection: onInstalled, onStartup, onUpdated, onActivated, onFocusChanged, onCreated
 
 const api = chrome;
 
 // Storage keys
 const KEY_ENABLED = "enabledEverywhere";   // bool
 const KEY_GIF_URL = "currentGifUrl";       // string (http(s) ou dataURL)
-const KEY_POS     = "currentGifPos";       // { top:number, left:number } en pixels
+const KEY_POS     = "currentGifPos";       // { top:number, left:number }
 
-// Domain filters pour tabs.query (évite les pages "chrome://")
 const URL_FILTERS = ["http://*/*", "https://*/*", "file://*/*"];
 
-// Helper: lit l'état courant (enabled, url, position)
+// ===== Helpers =====
 async function getState() {
-  const st = await chrome.storage.local.get(["enabledEverywhere","currentGifUrl","currentGifPos"]);
+  const st = await api.storage.local.get([KEY_ENABLED, KEY_GIF_URL, KEY_POS]);
   return {
-    enabled: !!st.enabledEverywhere,
-    url: st.currentGifUrl || "",
-    pos: st.currentGifPos || null
+    enabled: !!st[KEY_ENABLED],
+    url: st[KEY_GIF_URL] || "",
+    pos: st[KEY_POS] || null
   };
 }
 
-// Met à jour la position (appelé depuis la page injectée)
 async function setPosition(top, left) {
   await api.storage.local.set({ [KEY_POS]: { top: Math.round(top), left: Math.round(left) } });
 }
 
-// Injecte CSS + DOM + logique drag/clamp dans un onglet donné
+function isInjectableUrl(url) {
+  return /^https?:|^file:/.test(url || "");
+}
+
+// ===== Injection =====
 async function injectInto(tabId, { url, pos }) {
   if (!url) return;
   try {
     // 1) CSS
-    await api.scripting.insertCSS({
-      target: { tabId },
-      files: ["inject.css"]
-    });
+    await api.scripting.insertCSS({ target: { tabId }, files: ["inject.css"] });
 
-    // 2) Script (isolated world) — crée/MAJ le DOM + DRAG + CLAMP + PERSIST → sendMessage SET_POS
+    // 2) JS (recrée DOM + handlers à chaque injection)
     await api.scripting.executeScript({
       target: { tabId },
       func: (gifUrl, storedPos) => {
         const HOST_ID = "mini-gif-footer__host";
         const BOX_ID  = "mini-gif-footer";
         const IMG_ID  = "mini-gif-footer__img";
-        const EDGE_PAD = 8; // marge intérieure
-        const hasChrome = typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage;
+        const EDGE_PAD = 8;
 
-        // 1) DOM host/box/img
-        let host = document.getElementById(HOST_ID);
-        if (!host) {
-          host = document.createElement("div");
-          host.id = HOST_ID;
+        // Nettoyage: supprime toute instance précédente -> évite handlers "fantômes"
+        const prev = document.getElementById(HOST_ID);
+        if (prev) prev.remove();
 
-          const box = document.createElement("div");
-          box.id = BOX_ID;
+        // DOM
+        const host = document.createElement("div");
+        host.id = HOST_ID;
 
-          const img = document.createElement("img");
-          img.id = IMG_ID;
-          img.alt = "Mini GIF";
+        const box = document.createElement("div");
+        box.id = BOX_ID;
+        box.style.cursor = "grab"; // curseur par défaut
 
-          box.appendChild(img);
-          host.appendChild(box);
-          document.documentElement.appendChild(host);
-        }
+        const img = document.createElement("img");
+        img.id = IMG_ID;
+        img.alt = "Mini GIF";
 
-        const box = document.getElementById(BOX_ID);
-        const img = document.getElementById(IMG_ID);
+        box.appendChild(img);
+        host.appendChild(box);
+        document.documentElement.appendChild(host);
+
+        // Applique le GIF
         img.src = gifUrl;
 
-        // 2) Position initiale
-        // Si on a une position stockée (commune à tous les onglets), on l'applique en mode "libre" (top/left)
+        // Position initiale:
+        // si position stockée -> mode libre (top/left, transform none)
         if (storedPos && typeof storedPos.top === "number" && typeof storedPos.left === "number") {
           box.style.position = "fixed";
           box.style.transform = "none";
@@ -77,95 +79,79 @@ async function injectInto(tabId, { url, pos }) {
           box.style.right  = "auto";
           box.style.top  = `${storedPos.top}px`;
           box.style.left = `${storedPos.left}px`;
-          reclamp(); // on s'assure que ça ne dépasse pas
-        } else {
-          // Sinon, on laisse le CSS par défaut (bas centré).
-          // Rien à faire ici : `inject.css` gère bottom:10px + translateX(-50%).
+          reclamp(false); // clamp sans persist immédiat
         }
+        // sinon: laisse le CSS par défaut (bas, centré) défini dans inject.css
 
-        // 3) Drag/clamp — attacher une seule fois
-        if (!box.dataset.dragReady) {
-          box.dataset.dragReady = "1";
+        // Drag + clamp
+        let dragging = false;
+        let startX = 0, startY = 0;
+        let startTop = 0, startLeft = 0;
 
-          let dragging = false;
-          let startX = 0, startY = 0;
-          let startTop = 0, startLeft = 0;
+        const onMouseDown = (e) => {
+          dragging = true;
+          box.style.cursor = "grabbing";
 
-          const onMouseDown = (e) => {
-            dragging = true;
-            box.style.cursor = "grabbing";
+          const rect = box.getBoundingClientRect();
+          // Passe en mode libre et écrase toute contrainte CSS
+          box.style.position = "fixed";
+          box.style.transform = "none";
+          box.style.bottom = "auto";
+          box.style.right  = "auto";
+          box.style.top  = `${rect.top}px`;
+          box.style.left = `${rect.left}px`;
 
-            const rect = box.getBoundingClientRect();
+          startX = e.clientX;
+          startY = e.clientY;
+          startTop = rect.top;
+          startLeft = rect.left;
+          e.preventDefault();
+        };
 
-            // Passe en mode libre : écraser les contraintes CSS
-            box.style.position = "fixed";
-            box.style.transform = "none"; // plutôt que "", pour écraser la règle CSS
-            box.style.bottom = "auto";
-            box.style.right  = "auto";
-            box.style.top  = `${rect.top}px`;
-            box.style.left = `${rect.left}px`;
+        const onMouseMove = (e) => {
+          if (!dragging) return;
+          const dx = e.clientX - startX;
+          const dy = e.clientY - startY;
 
-            startX = e.clientX;
-            startY = e.clientY;
-            startTop = rect.top;
-            startLeft = rect.left;
-
-            e.preventDefault();
-          };
-
-          const onMouseMove = (e) => {
-            if (!dragging) return;
-
-            const dx = e.clientX - startX;
-            const dy = e.clientY - startY;
-
-            const rect = box.getBoundingClientRect();
-            const vw = window.innerWidth;
-            const vh = window.innerHeight;
-
-            let nextTop  = startTop + dy;
-            let nextLeft = startLeft + dx;
-
-            // Clamp aux bords
-            nextTop  = Math.max(EDGE_PAD, Math.min(nextTop,  vh - rect.height - EDGE_PAD));
-            nextLeft = Math.max(EDGE_PAD, Math.min(nextLeft, vw - rect.width  - EDGE_PAD));
-
-            box.style.top  = `${Math.round(nextTop)}px`;
-            box.style.left = `${Math.round(nextLeft)}px`;
-          };
-
-          const onMouseUp = () => {
-            if (!dragging) return;
-            dragging = false;
-            box.style.cursor = "grab";
-            // Persister position globale (tous onglets partagent)
-            const rect = box.getBoundingClientRect();
-            if (hasChrome) {
-              try { chrome.runtime.sendMessage({ type: "SET_POS", top: rect.top, left: rect.left }); } catch {}
-            }
-          };
-
-          box.addEventListener("mousedown", onMouseDown);
-          window.addEventListener("mousemove", onMouseMove);
-          window.addEventListener("mouseup", onMouseUp);
-
-          // Re-clamp si la fenêtre change (zoom/resize) et persister
-          window.addEventListener("resize", () => {
-            reclamp(true);
-          });
-        }
-
-        // Reclamp helper (et persiste si demandé)
-        function reclamp(persist = false) {
           const rect = box.getBoundingClientRect();
           const vw = window.innerWidth;
           const vh = window.innerHeight;
 
-          let top  = rect.top;
-          let left = rect.left;
+          let nextTop  = startTop + dy;
+          let nextLeft = startLeft + dx;
 
-          top  = Math.max(EDGE_PAD, Math.min(top,  vh - rect.height - EDGE_PAD));
-          left = Math.max(EDGE_PAD, Math.min(left, vw - rect.width  - EDGE_PAD));
+          nextTop  = Math.max(EDGE_PAD, Math.min(nextTop,  vh - rect.height - EDGE_PAD));
+          nextLeft = Math.max(EDGE_PAD, Math.min(nextLeft, vw - rect.width  - EDGE_PAD));
+
+          box.style.top  = `${Math.round(nextTop)}px`;
+          box.style.left = `${Math.round(nextLeft)}px`;
+        };
+
+        const onMouseUp = () => {
+          if (!dragging) return;
+          dragging = false;
+          box.style.cursor = "grab";
+          const rect = box.getBoundingClientRect();
+          // Persiste position globale
+          if (chrome?.runtime?.sendMessage) {
+            try { chrome.runtime.sendMessage({ type: "SET_POS", top: rect.top, left: rect.left }); } catch {}
+          }
+        };
+
+        box.addEventListener("mousedown", onMouseDown);
+        window.addEventListener("mousemove", onMouseMove);
+        window.addEventListener("mouseup", onMouseUp);
+
+        // Reclamp sur resize + persist
+        window.addEventListener("resize", () => reclamp(true));
+
+        function reclamp(persist) {
+          const rect = box.getBoundingClientRect();
+          const vw = window.innerWidth;
+          const vh = window.innerHeight;
+
+          let top  = Math.max(EDGE_PAD, Math.min(rect.top,  vh - rect.height - EDGE_PAD));
+          let left = Math.max(EDGE_PAD, Math.min(rect.left, vw - rect.width  - EDGE_PAD));
 
           box.style.position = "fixed";
           box.style.transform = "none";
@@ -174,63 +160,97 @@ async function injectInto(tabId, { url, pos }) {
           box.style.top  = `${Math.round(top)}px`;
           box.style.left = `${Math.round(left)}px`;
 
-          if (persist && hasChrome) {
+          if (persist && chrome?.runtime?.sendMessage) {
             try { chrome.runtime.sendMessage({ type: "SET_POS", top, left }); } catch {}
           }
         }
       },
       args: [url, pos]
     });
-  } catch (e) {
-    // ex: chrome://, chromewebstore… => ignore
+  } catch {
+    // ex: chrome:// ou pages protégées => ignore
   }
 }
 
-// Active/désactive le mode "Afficher partout"
+// ===== Mode "Afficher partout" =====
 async function setEnabledEverywhere(enabled) {
   await api.storage.local.set({ [KEY_ENABLED]: !!enabled });
   if (!enabled) return;
   const st = await getState();
   if (!st.url) return;
-  // Injecte dans tous les onglets visibles (HTTP/HTTPS/FILE)
   const tabs = await api.tabs.query({ url: URL_FILTERS });
   for (const t of tabs) {
-    if (t.id) await injectInto(t.id, { url: st.url, pos: st.pos });
+    if (t.id && isInjectableUrl(t.url)) {
+      await injectInto(t.id, { url: st.url, pos: st.pos });
+    }
   }
 }
 
-// === Listeners cycle de vie ===
-
-// Au démarrage / installation : si "enabled", ré-injecter là où c'est possible
+// ===== Réinjections automatiques =====
 api.runtime.onInstalled.addListener(async () => {
   const st = await getState();
   if (st.enabled && st.url) {
     const tabs = await api.tabs.query({ url: URL_FILTERS });
-    for (const t of tabs) if (t.id) await injectInto(t.id, { url: st.url, pos: st.pos });
+    for (const t of tabs) if (t.id && isInjectableUrl(t.url)) {
+      await injectInto(t.id, { url: st.url, pos: st.pos });
+    }
   }
 });
+
 api.runtime.onStartup?.addListener(async () => {
   const st = await getState();
   if (st.enabled && st.url) {
     const tabs = await api.tabs.query({ url: URL_FILTERS });
-    for (const t of tabs) if (t.id) await injectInto(t.id, { url: st.url, pos: st.pos });
+    for (const t of tabs) if (t.id && isInjectableUrl(t.url)) {
+      await injectInto(t.id, { url: st.url, pos: st.pos });
+    }
   }
 });
 
-// À chaque navigation complétée : si enabled, injecter
+// Quand la page finit de charger
 api.tabs.onUpdated.addListener(async (tabId, info, tab) => {
   if (info.status !== "complete") return;
   const st = await getState();
-  if (st.enabled && st.url) {
+  if (st.enabled && st.url && isInjectableUrl(tab?.url)) {
     await injectInto(tabId, { url: st.url, pos: st.pos });
   }
 });
 
-// === Messages depuis la popup ===
-// - SET_GIF_URL: définit l'URL courante, et si enabled → injecte partout
-// - SET_ENABLED: active/désactive le mode partout (et injecte si on active)
-// - INJECT_CURRENT_TAB: injecte seulement dans l'onglet actif
-// - SET_POS: (provenant de la page injectée) met à jour la position globale partagée
+// Quand on change d’onglet actif
+api.tabs.onActivated.addListener(async ({ tabId }) => {
+  const st = await getState();
+  if (!st.enabled || !st.url) return;
+  try {
+    const tab = await api.tabs.get(tabId);
+    if (tab?.url && isInjectableUrl(tab.url)) {
+      await injectInto(tabId, { url: st.url, pos: st.pos });
+    }
+  } catch {}
+});
+
+// Quand on change de fenêtre
+api.windows.onFocusChanged.addListener(async (windowId) => {
+  if (windowId === api.windows.WINDOW_ID_NONE) return;
+  const st = await getState();
+  if (!st.enabled || !st.url) return;
+  try {
+    const [tab] = await api.tabs.query({ active: true, windowId });
+    if (tab?.id && isInjectableUrl(tab.url)) {
+      await injectInto(tab.id, { url: st.url, pos: st.pos });
+    }
+  } catch {}
+});
+
+// Quand un onglet est créé
+api.tabs.onCreated.addListener(async (tab) => {
+  const st = await getState();
+  if (!st.enabled || !st.url) return;
+  if (tab.id && isInjectableUrl(tab.url)) {
+    await injectInto(tab.id, { url: st.url, pos: st.pos });
+  }
+});
+
+// ===== Messages depuis popup =====
 api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     try {
@@ -238,11 +258,10 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         await api.storage.local.set({ [KEY_GIF_URL]: msg.url });
         const st = await getState();
         if (st.enabled) {
-          // injecte dans tous les onglets ouverts
           const tabs = await api.tabs.query({ url: URL_FILTERS });
-          for (const t of tabs) if (t.id) await injectInto(t.id, { url: msg.url, pos: st.pos });
-        } else {
-          // Si pas enabled, on ne force pas partout (la popup peut demander l'onglet courant)
+          for (const t of tabs) if (t.id && isInjectableUrl(t.url)) {
+            await injectInto(t.id, { url: msg.url, pos: st.pos });
+          }
         }
         sendResponse({ ok: true });
         return;
@@ -257,7 +276,7 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (msg?.type === "INJECT_CURRENT_TAB") {
         const [tab] = await api.tabs.query({ active: true, currentWindow: true });
         const st = await getState();
-        if (tab?.id && st.url) {
+        if (tab?.id && st.url && isInjectableUrl(tab.url)) {
           await injectInto(tab.id, { url: st.url, pos: st.pos });
         }
         sendResponse({ ok: true });
@@ -275,5 +294,5 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse({ ok: false, error: String(e) });
     }
   })();
-  return true; // async response
+  return true;
 });
